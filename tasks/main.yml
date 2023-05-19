@@ -1,0 +1,74 @@
+- name: Determine start time from local file if not running in Ansible Controller
+  ansible.builtin.set_fact:
+    start_time: "{{ lookup('ansible.builtin.file', 'start_time.txt') }}"
+  when: awx_job_id is not defined
+
+# - name: Delete existing Delta Analysis job
+#   cisco.nd.nd_delta_analysis:
+#     insights_group: "{{ insights_group }}"
+#     site_name: "{{ site_name }}"
+#     name: "{{ job_name }}-{{ start_time }}"
+#     state: absent
+
+- name: Determine Epoch before Start
+  cisco.nd.nd_epoch:
+    insights_group: "{{ insights_group }}"
+    site: "{{ site_name }}"
+    to_date: "{{ start_time }}"
+    range: true
+    max_epochs: 1
+  register: epoch_earlier
+
+- name: Trigger Instant Assurance analysis job
+  cisco.nd.nd_instant_assurance_analysis:
+    insights_group: "{{ insights_group }}"
+    site_name: "{{ site_name }}"
+    state: present
+  register: instant_analysis_job
+  
+- name: Wait until Instant Assurance analysis is completed
+  cisco.nd.nd_instant_assurance_analysis:
+    insights_group: "{{ insights_group }}"
+    site_name: "{{ site_name }}"
+    job_id: "{{ instant_analysis_job.current.jobId }}"
+    state: query
+  register: instant_analysis_info
+  until: instant_analysis_info.current.operSt == "COMPLETE"
+  retries: 180
+  delay: 10
+
+- name: Trigger Delta Analysis
+  cisco.nd.nd_delta_analysis:
+    insights_group: "{{ insights_group }}"
+    site_name: "{{ site_name }}"
+    name: "{{ job_name }}-{{ start_time }}"
+    earlier_epoch_id: "{{ epoch_earlier.current[0].epochId }}"
+    later_epoch_id: "{{ instant_analysis_info.current.epochInfo.epochId }}"
+    state: present
+  register: delta_analysis_info
+
+- name: Validate Delta Analysis
+  cisco.nd.nd_delta_analysis:
+    insights_group: "{{ insights_group }}"
+    site_name: "{{ site_name }}"
+    name: "{{ job_name }}-{{ start_time }}"
+    state: validate
+  register: delta_analysis_results
+
+- name: Set Post-Change Delta Analysis results as variable
+  ansible.builtin.set_stats:
+    data:
+      delta_analysis_results: "{{ delta_analysis_results }}"
+  when: awx_job_id is defined
+  register: delta_analysis_info
+
+- name: Custom validation of Pre-Change Analysis results
+  ansible.builtin.assert:
+    that:
+      - delta_analysis_results.current.anomaly_count.critical.epoch2_only == 0
+      - delta_analysis_results.current.anomaly_count.major.epoch2_only == 0
+      - delta_analysis_results.current.anomaly_count.minor.epoch2_only == 0
+      - delta_analysis_results.current.anomaly_count.warning.epoch2_only == 0
+    success_msg: "Post-Change Validation - Delta Analysis successful, no new anomalies found"
+    fail_msg: "Post-Change Validation - Delta Analysis failed, new anomalies have been found"
+  when: awx_job_id is not defined
