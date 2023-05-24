@@ -25,7 +25,6 @@
     site_name: "{{ site_name }}"
     state: present
   register: instant_analysis_job
-  timeout: 180
   
 - name: Wait until Instant Assurance analysis is completed
   cisco.nd.nd_instant_assurance_analysis:
